@@ -15,49 +15,55 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <string.h>
-#include <iostream>
-#include <cstdint>
+#include <linux/types.h>
+#include <asm/ptrace.h>
+#include <errno.h>
 
+#define OP_CMD_READ 601
+#define OP_CMD_WRITE 602
+#define OP_CMD_BASE 603
+#define OP_CMD_GETPID 604
+#define OP_CMD_HIDE_PROCESS 605
+#define OP_CMD_UN_HOOK 606
+#define OP_CMD_RECOVER_PROCESS 607
+#define OP_CMD_GYRO 608
+
+#define PARADISE_GYRO_MASK_GYRO (1u << 0)
+#define PARADISE_GYRO_MASK_UNCAL (1u << 1)
+#define PARADISE_GYRO_MASK_ALL (PARADISE_GYRO_MASK_GYRO | PARADISE_GYRO_MASK_UNCAL)
+
+
+struct paradise_gyro_config_cmd {
+    int enable;      
+    uint32_t type_mask; 
+    float x;
+    float y;
+    float z;
+};
+
+typedef struct _COPY_MEMORY {
+    pid_t pid;
+    uintptr_t addr;
+    void* buffer;
+    size_t size;
+} COPY_MEMORY, *PCOPY_MEMORY;
+
+typedef struct _MODULE_BASE {
+    pid_t pid;
+    char* name;     // 这里的 name 是指针，内核态会通过 copy_from_user 去读字符串
+    uintptr_t base;
+    short index;
+} MODULE_BASE, *PMODULE_BASE;
 
 
 class c_driver {
 private:
-    int has_upper = 0;
-    int has_lower = 0;
-    int has_symbol = 0;
-    int has_digit = 0;
     int fd;
     pid_t pid;
 
-    typedef struct _COPY_MEMORY {
-		pid_t pid;
-		uintptr_t addr;
-		void* buffer;
-		size_t size;
-	} COPY_MEMORY, *PCOPY_MEMORY;
-
-	typedef struct _MODULE_BASE {
-		pid_t pid;
-		char* name;
-		uintptr_t base;
-	} MODULE_BASE, *PMODULE_BASE;
-
-    enum OPERATIONS
-    {
-        OP_INIT_KEY = 800,
-        OP_READ_MEM = 601,
-        OP_WRITE_MEM = 602,
-        OP_MODULE_BASE = 603,
-        OP_HIDE_PROCESS = 605,
-    };
-
 public:
     c_driver() {
-        fd = socket(AF_INET, SOCK_DGRAM, 0);
-        if (fd == -1) {
-            perror("[-] 打开失败");
-            exit(EXIT_FAILURE);
-        }
+
     }
 
     ~c_driver() {
@@ -66,104 +72,80 @@ public:
     }
 
     void initialize(pid_t pid) {
-		this->pid = pid;
-	}
+        this->pid = pid;
+    }
 
-    bool init_key(char* key) {
-		char buf[0x100];
-		strcpy(buf,key);
-		if (ioctl(fd, OP_INIT_KEY, buf) != 0) {
-			return false;
-		}
-		return true;
-	}
+    bool read(uintptr_t addr, void *buffer, size_t size) {
+        COPY_MEMORY cm;
+        cm.pid = this->pid;
+        cm.addr = addr;
+        cm.buffer = buffer;
+        cm.size = size;
+        return ioctl(fd, OP_CMD_READ, &cm) == 0;
+    }
 
-	bool read(uintptr_t addr, void *buffer, size_t size) {
-		COPY_MEMORY cm;
+    bool write(uintptr_t addr, void *buffer, size_t size) {
+        COPY_MEMORY cm;
+        cm.pid = this->pid;
+        cm.addr = addr;
+        cm.buffer = buffer;
+        cm.size = size;
+        return ioctl(fd, OP_CMD_WRITE, &cm) == 0;
+    }
+    
+    template <typename T>
+    T read(uintptr_t addr) {
+        T res;
+        if (this->read(addr, &res, sizeof(T)))
+            return res;
+        return {};
+    }
 
-		cm.pid = this->pid;
-		cm.addr = addr;
-		cm.buffer = buffer;
-		cm.size = size;
+    template <typename T>
+    bool write(uintptr_t addr, T value) {
+        return this->write(addr, &value, sizeof(T));
+    }
 
-		if (ioctl(fd, OP_READ_MEM, &cm) != 0) {
-			return false;
-		}
-		return true;
-	}
+    uintptr_t get_module_base(char* module_name) {
+        MODULE_BASE mb;
+        mb.pid = this->pid;
+        mb.name = module_name; // 传指针给内核，内核自行读取
+        mb.base = 0;
+        
+        if (ioctl(fd, OP_CMD_BASE, &mb) == 0) {
+            return mb.base;
+        }
+        return 0;
+    }
 
-	bool write(uintptr_t addr, void *buffer, size_t size) {
-		COPY_MEMORY cm;
+    void hide_process() { 
+        ioctl(fd, OP_CMD_HIDE_PROCESS); 
+    }
+  
+    void recover_process() {
+        ioctl(fd, OP_CMD_RECOVER_PROCESS);
+    }
 
-		cm.pid = this->pid;
-		cm.addr = addr;
-		cm.buffer = buffer;
-		cm.size = size;
 
-		if (ioctl(fd, OP_WRITE_MEM, &cm) != 0) {
-			return false;
-		}
-		return true;
-	}
+    bool gyro_update(bool enable, float x, float y, uint32_t type_mask = PARADISE_GYRO_MASK_ALL) {
+        struct paradise_gyro_config_cmd cmd;
+        memset(&cmd, 0, sizeof(cmd));
+        
+        cmd.enable = enable ? 1 : 0;
+        cmd.type_mask = type_mask;
+        cmd.x = x;
+        cmd.y = y;
 
-	template <typename T>
-	T read(uintptr_t addr) {
-		T res;
-		if (this->read(addr, &res, sizeof(T)))
-			return res;
-		return {};
-	}
-
-	template <typename T>
-	bool write(uintptr_t addr,T value) {
-		return this->write(addr, &value, sizeof(T));
-	}
-
-	uintptr_t get_module_base(char* name) {
-		MODULE_BASE mb;
-		char buf[0x100];
-		strcpy(buf,name);
-		mb.pid = this->pid;
-		mb.name = buf;
-
-		if (ioctl(fd, OP_MODULE_BASE, &mb) != 0) {
-			return 0;
-		}
-		return mb.base;
-	}
-void hide_process() { ioctl(fd, OP_HIDE_PROCESS); }
+        if (ioctl(fd, OP_CMD_GYRO, &cmd) != 0) {
+            return false;
+        }
+        return true;
+    }
 };
 
-static c_driver *driver = nullptr;
-
-// 全局驱动清理
-static void release_global_driver() {
-    if (driver != nullptr) {
-        delete driver;
-        driver = nullptr;
-        printf("[*] 全局driver已释放！\n");
-    }
-}
-
-// 注册程序退出时的清理函数
-__attribute__((constructor)) 
-static void reg_init_func() {
-
-    // 使用 nothrow，失败时返回 nullptr
-    driver = new (std::nothrow) c_driver();
-
-    if (driver == nullptr) {
-        printf("[!] driver 分配失败\n");
-        exit(EXIT_FAILURE);
-    }
-
-    printf("[-] driver 初始化成功\n");
-
-    atexit(release_global_driver);
-}
+static c_driver *driver = new c_driver();
 
 /*--------------------------------------------------------------------------------------------------------*/
-
 typedef char PACKAGENAME;	// 包名
 pid_t pid;	// 进程ID
 
@@ -172,11 +154,11 @@ float Kernel_v()
 	const char* command = "uname -r | sed 's/\\.[^.]*$//g'";
 	FILE* file = popen(command, "r");
 	if (file == NULL) {
-    	return 0.0f;
+    	return NULL;
 	}
 	static char result[512];
 	if (fgets(result, sizeof(result), file) == NULL) {
-		return 0.0f;
+		return NULL;
 	}
 	pclose(file);
     result[strlen(result)-1] = '\0';
@@ -262,7 +244,7 @@ long GetModuleBaseAddr(char* module_name)
     char line[1024];
     if (pid < 0)
     {
-        snprintf(filename, sizeof(filename), "/proc/self/maps");
+        snprintf(filename, sizeof(filename), "/proc/self/maps", pid);
     }
     else
     {
@@ -390,4 +372,5 @@ int WriteFloat(long int addr, float value)
 	driver->write(addr, &value, 4);
 	return 0;
 }
-#endif
+
+#endif // KERNEL_H
