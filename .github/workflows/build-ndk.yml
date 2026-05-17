@@ -26,7 +26,6 @@ on:
           - driverParadise
           - driverQX114
 
-# 💡 修复产物重名：设置全局环境变量，全程只用这一个名字
 env:
   SELECTED_DRIVER: ${{ github.event.inputs.DRIVER || 'ditProKpm' }}
 
@@ -39,55 +38,36 @@ jobs:
       - name: 检出源码 (Checkout Code)
         uses: actions/checkout@v4
 
-      - name: 🚀 自动配置 Linux & NDK 环境 (Setup NDK)
+      - name: 🚀 自动配置 NDK 环境 (Setup NDK)
         run: |
           echo "NDK_PATH=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
           echo "$ANDROID_NDK_LATEST_HOME" >> $GITHUB_PATH
 
       - name: 🔨 执行编译 (Build Project)
         run: |
-          # 组合完整路径并进入
           FULL_PATH="KernelGg/${{ env.SELECTED_DRIVER }}"
           echo "👉 正在进入目录: $FULL_PATH"
           cd "$FULL_PATH" || { echo "❌ 找不到目录 $FULL_PATH"; exit 1; }
 
-          # 💡 核心修复：直接绕过作者的本地路径验证脚本，使用官方底层命令
+          # 绕过本地脚本，直接调用底层编译
           if [ -f "jni/Android.mk" ] || [ -f "Android.mk" ]; then
-            echo "✅ 发现 Android.mk！"
-            echo "🚨 正在绕过本地 build.sh，直接调用底层官方 ndk-build 编译..."
-            ndk-build -j$(nproc --all) || { echo "❌ C/C++ 源码编译失败！请查看上方报错日志"; exit 1; }
+            echo "✅ 发现 Android.mk！开始编译..."
+            ndk-build -j$(nproc --all) || { echo "❌ C/C++ 源码编译失败！"; exit 1; }
           elif [ -f "build.sh" ]; then
-            echo "⚠️ 没找到 Android.mk，只能尝试暴力剥离 build.sh 的路径..."
+            echo "⚠️ 尝试执行 build.sh..."
             chmod +x build.sh
             sed -i 's|/[^ ]*/ndk-build|ndk-build|g' build.sh
             ./build.sh || { echo "❌ C/C++ 源码编译失败！"; exit 1; }
           else
-            echo "❌ 既没有 Android.mk 也没有 build.sh，无法编译！"
+            echo "❌ 无法编译！"
             exit 1
           fi
 
-      - name: 📦 搜集并整理编译产物 (Gather Artifacts)
-        run: |
-          STAGING_DIR="${{ github.workspace }}/upload_staging"
-          mkdir -p "$STAGING_DIR"
-          
-          echo "🔍 全盘搜索 libKernelGg.so..."
-          FIND_RESULT=$(find . -name "libKernelGg.so")
-          
-          if [ -z "$FIND_RESULT" ]; then
-            echo "❌ 严重错误：编译貌似没报错，但就是没生成 libKernelGg.so 文件！"
-            exit 1
-          else
-            echo "🎉 成功找到产物："
-            echo "$FIND_RESULT"
-            find . -name "libKernelGg.so" -exec cp {} "$STAGING_DIR/" \;
-          fi
-
-      - name: ☁️ 上传为下载压缩包 (Upload Artifact)
+      - name: ☁️ 精准提取并上传产物 (Upload Artifact)
         uses: actions/upload-artifact@v4
         with:
-          # 打包出来的名字绝对跟你的下拉菜单一致
           name: libKernelGg-${{ env.SELECTED_DRIVER }}
-          path: upload_staging/libKernelGg.so
+          # 💡 终极修复：直接锁定刚才编译的那个文件夹里的产物，拒绝全局搜索，绝不串台！
+          path: KernelGg/${{ env.SELECTED_DRIVER }}/libs/arm64-v8a/libKernelGg.so
           compression-level: 9
           if-no-files-found: error
