@@ -1,260 +1,318 @@
+#ifndef KERNEL_H
+#define KERNEL_H
+
 #include <iostream>
 #include <dirent.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/syscall.h>
-#include <sys/socket.h>
-#include <linux/netlink.h>
-#define MAX_PAYLOAD 1048
+#include <sys/stat.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <ctype.h>
+#include <time.h>
+#include <sys/ioctl.h>
+#include <vector>
+#include <string>
+#include <regex>
+#include <sstream>
 
-// dit 3.3
-struct Memory_uct
-{
-	int read_write;				// 读或者写
-	int pid;
-	uintptr_t addr;
-	void *buffer;
-	size_t size;
+
+
+// 内存类型 标志
+enum MEMTYPR {
+    MEMREAD = 1UL << 1, //读
+    MEMWRITE = 1UL << 2, //写
+    MEMSYSTEM = 1UL << 3, //使用系统API (读/写)
+    MEMASM = 1UL << 4, //使用汇编指令 (读写)
+    MEMWRITEUSER = 1UL << 5, //(写) 只写用户页面自身可写的，不加默认全部可写
+    MEMCPU = 1UL << 7, //获取经过CPU的地址 (读写)
+    MEMUNINSTALL = 1UL << 9, //释放内存
 };
 
-// dit pro 3.3
-struct Ditpro_uct
+// 其他 标志
+enum OTHERTYPR {
+    PROCESSPID = 1UL << 10, //获取PID
+    MODULEBASE = 1UL << 11, //获取模块
+    HIDEPID = 1UL << 12, //隐藏进程
+    UNHIDEPID = 1UL << 13, //恢复隐藏的进程
+    HIDEEVENT = 1UL << 14, //抹除创建的触摸驱动
+    UNHIDEEVENT = 1UL << 15, //恢复抹除的触摸驱动
+};
+
+//标志结合 预设组合
+#define __NR_syscall_ 18 //调用号
+#define __FLAGS 1UL << 0 //标志
+#define __CHECKSUCCESS (1UL << 30)
+enum {
+    DRIVERSUCCESS = 616,
+};
+
+#define __READSYSTEM (__FLAGS | MEMREAD | MEMSYSTEM) //读使用系统API
+#define __READASM (__FLAGS | MEMREAD | MEMASM) //读使用汇编
+#define __WRITESYSTEM (__FLAGS | MEMWRITE | MEMSYSTEM) //写使用系统API
+#define __WRITEASM (__FLAGS | MEMWRITE | MEMASM) //写使用汇编
+#define __MEMUNINSTALL (__FLAGS | MEMUNINSTALL) //释放内存
+
+struct Ditpro_uct_base {
+    pid_t pid;
+    const char* name;
+    uint64_t base;
+};
+
+struct Ditpro_uct_kpm
 {
-	int read_write;				// 读或者写
-	int pid;
-	uintptr_t addr;
+	int32_t pid;
+	uint64_t addr;
 	void *buffer;
-	size_t size;
-	int wendi;					// 这个是判断只进行属于我们的操作,616
+	uint32_t size;
+}__attribute__((aligned(8)));
+
+struct Dit_Device_Uct {
+	char name[32];
+	unsigned long addr;
 };
 
 
-class drivers
+class c_driver
 {
-  private:
-	bool ditbool;
-	int sock_fd;
-	struct sockaddr_nl dest_addr;
-	struct nlmsghdr *nlh;
-	struct iovec iov;
-	struct msghdr msg;
-	pid_t pid;
-
-  public:
-	int drivers_byte;
-
-	  drivers()
+private:
+	
+	pid_t pid = -1;
+	int fd;
+	
+public:
+    float *mode = nullptr;
+	bool *cpuaddr = nullptr;
+	
+	int DriverInput = -1;
+	void start_drivers(int Continue)
 	{
-
-		drivers_byte = 0;
-		sock_fd = -1;
-		nlh = NULL;
-
-		sock_fd = socket(PF_NETLINK, SOCK_RAW, 17);
-
-		if (sock_fd < 0)
+		fd = -1;
+		printf("[0] ditPro (1.0*) - kpm\n");
+		printf("[1] ditPro (1.0*) - ko\n");	
+		
+		printf("\n");
+		printf("请选择 (0~1):");
+		if(Continue <= 1)
+		    scanf("%d", &DriverInput);
+			
+		if (DriverInput == 1)
 		{
-			if (sock_fd != -1)
-			{
-				close(sock_fd);
-				sock_fd = -1;
+			int check = (__FLAGS | __CHECKSUCCESS);
+			if(syscall(__NR_syscall_, &check) == DRIVERSUCCESS){
+			    int va = DRIVERSUCCESS;   
+                fd = syscall(__NR_syscall_, &va);
+	            if (fd < 0){
+		            printf("未刷入驱动程序或者不成功");
+		            exit(1);
+	            }
+			}else{
+				printf("未刷入驱动程序或者不成功");
+		        exit(1);
 			}
-			if (nlh != NULL)
-			{
-				free(nlh);
-				nlh = NULL;
+			printf("ditpro_ko 驱动\n\n");
+		}
+		else if (DriverInput == 0)
+		{
+			int check = syscall(__NR_syscall_, (__FLAGS | __CHECKSUCCESS));
+			if(check != DRIVERSUCCESS){
+				printf("未刷入驱动程序或者不成功");
+		        exit(1);
 			}
-			this->drivers_byte = 0;	// 切换ditpro驱动
+			printf("ditpro_kpm 驱动\n");
 		}
 		else
 		{
-
-			memset(&dest_addr, 0, sizeof(dest_addr));
-			dest_addr.nl_family = AF_NETLINK;
-			dest_addr.nl_pid = 0;	// 内核
-			dest_addr.nl_groups = 0;
-
-			nlh = (struct nlmsghdr *)malloc(NLMSG_SPACE(MAX_PAYLOAD));
-			if (!nlh)
-			{
-				perror("malloc");
-				exit(1);
-			}
-			memset(nlh, 0, NLMSG_SPACE(MAX_PAYLOAD));
-			nlh->nlmsg_len = NLMSG_SPACE(MAX_PAYLOAD);
-			nlh->nlmsg_flags = 0;
-
-			iov.iov_base = (void *)nlh;
-			iov.iov_len = nlh->nlmsg_len;
-
-			msg.msg_name = (void *)&dest_addr;
-			msg.msg_namelen = sizeof(dest_addr);
-			msg.msg_iov = &iov;
-			msg.msg_iovlen = 1;
-			this->ditbool = true;	// 通过
-			this->drivers_byte = 1;	// 切换dit驱动
+			printf("输入错误,请重新输入\n");
+			exit(1);
 		}
 	}
 
+	void init_pid(pid_t pid)
+	{
+		{
+			this->pid = pid;
+		}
+	}
+	
 	bool read(uintptr_t addr, void *buffer, size_t size)
-	{
-		if ((int)this->drivers_byte == 1 && this->ditbool == true)
-		{
-			struct Memory_uct ptr;
-			void *uctaddr = &ptr;
-			ptr.addr = addr;
-			ptr.buffer = buffer;
-			ptr.pid = this->pid;
-			ptr.read_write = 0x400;
-			ptr.size = size;
-			int bytelen = 8;
-			char *source = (char *)&uctaddr;
-			char *target = (char *)NLMSG_DATA(nlh);
-			if (source == NULL || target == NULL)
-				return false;
-			while (bytelen--)
-			{
-				*target++ = *source++;
+    {
+		if (this->DriverInput == 0)
+        {
+            struct Ditpro_uct_kpm ptr = {this->pid, addr, buffer, size};
+            uint64_t flags = __READSYSTEM;
+            if((uint32_t)*this->mode != 1)
+                flags = __READASM;
+               
+			if(*this->cpuaddr == true){
+				flags |= MEMCPU;
 			}
-			if (sendmsg(sock_fd, &msg, 0) < 0)
-			{
-				return false;
-			}
-
-		}
-		else if ((int)this->drivers_byte == 0)
-		{
-			struct Ditpro_uct ptr;
-			ptr.read_write = 0x400;
-			ptr.addr = addr;
-			ptr.buffer = buffer;
-			ptr.wendi = 616;
-			ptr.pid = this->pid;
-			ptr.size = size;
-
-			if (syscall(SYS_lookup_dcookie, &ptr))
-			{
-				printf("执行到了这里");
+            if(!syscall(__NR_syscall_, flags, &ptr))
+                return true;
+        }
+        else if (this->DriverInput == 1)
+        {
+			struct Ditpro_uct_kpm ptr = {this->pid, addr, buffer, size};
+            uint64_t flags = __READASM;        
+               
+			if(*this->cpuaddr == true)
+				flags |= MEMCPU;
+            if(!ioctl(fd, flags, &ptr))
 				return true;
-			}
-		}
-
-		return true;
+        }
+        return false;
 	}
-
-	template < typename T > T read(uintptr_t addr)
+	
+	template <typename T>
+	T read(uintptr_t addr)
 	{
-		T res;
-		if (this->read(addr, &res, sizeof(T)))
+		T res __attribute__((aligned(8))){};
+		if (this->read(addr, &res, sizeof(T))){
 			return res;
-		return
-		{
-		};
+	    }
+		return {};
 	}
 
-	int init_pid(pid_t pid)
-	{
-		this->pid = pid;
-		return pid;
+	~c_driver()
+	{		
+        fd = -1;		
 	}
 
-	void initialize(pid_t pid)
-	{
-		this->pid = pid;
-	}
-
-	~drivers()
-	{
-		if (sock_fd != -1 && (int)this->drivers_byte == 1)
-			close(sock_fd);
-		if (nlh != NULL && (int)this->drivers_byte == 1)
-			free(nlh);
-	}
-
-	int getPID(const char *packageName)
-	{
-		int id = -1;
-		DIR *dir;
-		FILE *fp;
-		char filename[64];
-		char cmdline[64];
-		struct dirent *entry;
-		dir = opendir("/proc");
-		while ((entry = readdir(dir)) != NULL)
-		{
-			id = atoi(entry->d_name);
-			if (id != 0)
-			{
-				sprintf(filename, "/proc/%d/cmdline", id);
-				fp = fopen(filename, "r");
-				if (fp)
-				{
-					fgets(cmdline, sizeof(cmdline), fp);
-					fclose(fp);
-					if (strcmp(packageName, cmdline) == 0)
-					{
-						return id;
-					}
-				}
-			}
+	signed int getPid(const char *name){
+	    if(this->DriverInput == 0)
+	    {
+		    return syscall(__NR_syscall_, (__FLAGS | PROCESSPID), name);
 		}
-		closedir(dir);
+		else if(this->DriverInput == 1)
+		{
+		    return ioctl(fd, (__FLAGS | PROCESSPID), name);
+		}
 		return -1;
 	}
-
-	uintptr_t get_module_base(int pid, const char *module_name)
-	{
-		FILE *fp;
-		long addr = 0;
-		char *pch;
-		char filename[64];
-		char line[1024];
-		snprintf(filename, sizeof(filename), "/proc/%d/maps", pid);
-		fp = fopen(filename, "r");
-		if (fp != NULL)
-		{
-			while (fgets(line, sizeof(line), fp))
-			{
-				if (strstr(line, module_name))
-				{
-					pch = strtok(line, "-");
-					addr = strtoul(pch, NULL, 16);
-					if (addr == 0x8000)
-						addr = 0;
-					break;
-				}
-			}
-			fclose(fp);
+	
+	signed long getBase(pid_t pid, char *name){
+	    if(this->DriverInput == 0)
+	    {
+		    Ditpro_uct_base ptr = {this->pid, name, 0};
+            syscall(__NR_syscall_, (__FLAGS | MODULEBASE), &ptr);
+            return ptr.base;
 		}
-		return addr;
+		else if(this->DriverInput == 1)
+		{
+		    Ditpro_uct_base ptr = {this->pid, name, 0};
+            ioctl(fd, (__FLAGS | MODULEBASE), &ptr);
+            return ptr.base;
+		}
+		return 0;
 	}
+	
+	//释放内存，程序结束时调用，否则下次无法进入游戏
+    void mem_uninstall(){
+		if(this->DriverInput == 0)
+            syscall(__NR_syscall_, (__FLAGS | MEMUNINSTALL));
+		else if(this->DriverInput == 1)
+			ioctl(fd, (__FLAGS | MEMUNINSTALL));
+    }
+	
+	//隐藏进程，成功返回0
+    int hideproc(){
+		if(this->DriverInput == 0)
+            return syscall(__NR_syscall_, (__FLAGS | HIDEPID), gettid());
+		else if(this->DriverInput == 1)
+			return ioctl(fd, (__FLAGS | HIDEPID), gettid());
+    }
 
+    //恢复进程，程序结束前必须调用 程序结束前必须调用 程序结束前必须调用，否则重启
+    void unhideproc(){
+		if(this->DriverInput == 0)
+            syscall(__NR_syscall_, (__FLAGS | UNHIDEPID), gettid());
+		else if(this->DriverInput == 1)
+			ioctl(fd, (__FLAGS | UNHIDEPID), gettid());
+    }
+	
+	
+static int setts(int value) {
+    FILE *file;
+    loff_t pos = 0;
+    char buf[2];
+
+    file = fopen("/proc/sys/kernel/kptr_restrict", "r+");
+    if (!file) {
+        printf("Failed to open /proc/sys/kernel/kptr_restrict\n");
+        return -2;
+    }
+
+    snprintf(buf, sizeof(buf), "%d", value);
+
+    fwrite(buf, strlen(buf), 1, file);
+
+    fclose(file);
+
+    return 0;
+}
+
+unsigned long get_symbol_from_proc(const char *name)
+{
+	if(setts(0))
+	    return 0;
+	    
+    FILE *fp;
+    char buf[256];
+    unsigned long addr = 0;
+    
+    fp = fopen("/proc/kallsyms", "r");
+    if (!fp){
+    	printf("kallsyms open frined\n");
+        return 0;
+    }
+    
+    while (fgets(buf, 255, fp)) {
+        char sym_name[128] = {0};
+        char type;
+        
+        if (sscanf(buf, "%lx %c %127s", &addr, &type, sym_name) == 3) {
+            if (strcmp(sym_name, name) == 0) {
+                break;
+            }
+        }
+        addr = 0;
+    }
+    
+    fclose(fp);
+    
+    if(setts(2))
+	    return 0;
+	    
+    return addr;
+}
+
+	int hideevent(const char *name){
+		if(this->DriverInput == 0){
+			return syscall(__NR_syscall_, (__FLAGS | HIDEEVENT), name);
+		}else if(this->DriverInput == 1){
+		    struct Dit_Device_Uct cm;
+		    cm.addr = get_symbol_from_proc("input_dev_list");
+		    if(!cm.addr)
+			    return 1;
+		    memset(cm.name,0,32);	
+		    strncpy(cm.name, name, 31);
+		    return ioctl(fd, (__FLAGS | HIDEEVENT), &cm);
+		}
+		return 1;
+	}
+	
+	int unhideevent(){
+		if(this->DriverInput == 0){
+			return syscall(__NR_syscall_, (__FLAGS | UNHIDEEVENT));
+		}else if(this->DriverInput == 1){
+		    return ioctl(fd, (__FLAGS | UNHIDEEVENT));
+		}
+		return 1;
+	}
 };
 
-static drivers *driver = nullptr;
+static c_driver Core;
 
-// 全局驱动清理
-static void release_global_driver() {
-    if (driver != nullptr) {
-        delete driver;
-        driver = nullptr;
-        printf("[*] 全局driver已释放！\n");
-    }
-}
-
-// 注册程序退出时的清理函数
-__attribute__((constructor)) 
-static void reg_init_func() {
-
-    // 使用 nothrow，失败时返回 nullptr
-    driver = new (std::nothrow) drivers();
-
-    if (driver == nullptr) {
-        printf("[!] driver 分配失败\n");
-        exit(EXIT_FAILURE);
-    }
-
-    printf("[-] driver 初始化成功\n");
-
-    atexit(release_global_driver);
-}
+#endif
