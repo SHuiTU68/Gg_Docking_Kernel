@@ -35,54 +35,72 @@ jobs:
       - name: 检出源码 (Checkout Code)
         uses: actions/checkout@v4
 
-      - name: 配置 Android NDK 环境 (Setup NDK)
+      - name: 🚀 自动配置 Linux & NDK 环境 (Setup NDK)
         run: |
+          # 调用 GitHub Ubuntu 镜像自带的最新版 NDK
           echo "NDK_PATH=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
+          # 将 ndk-build 注入到系统全局变量中，相当于自动配好了 Linux 环境
           echo "$ANDROID_NDK_LATEST_HOME" >> $GITHUB_PATH
 
-      - name: 执行编译 (Build Project)
+      - name: 🔨 执行编译 (Build Project)
         run: |
-          if [ -d "KernelGg" ]; then
-            echo "👉 进入 KernelGg 目录"
-            cd KernelGg
-          else
-            echo "❌ 找不到 KernelGg 目录，请检查仓库结构！"
-            exit 1
+          # 1. 确定并进入目标目录 (修复 push 自动触发为空的 Bug)
+          TARGET_DRIVER="${{ github.event.inputs.DRIVER }}"
+          if [ -z "$TARGET_DRIVER" ]; then
+            TARGET_DRIVER="ditProKpm"
+            echo "⚠️ 自动触发，默认编译: $TARGET_DRIVER"
           fi
           
-          # 💡 修复核心：处理 push 自动触发时，变量为空的情况
-          TARGET_DIR="${{ github.event.inputs.DRIVER }}"
-          if [ -z "$TARGET_DIR" ]; then
-            TARGET_DIR="ditProKpm"
-            echo "⚠️ 检测到自动触发或未选定驱动，使用默认值: $TARGET_DIR"
-          fi
+          # 组合完整路径并进入
+          FULL_PATH="KernelGg/$TARGET_DRIVER"
+          echo "👉 正在进入目录: $FULL_PATH"
+          cd "$FULL_PATH" || { echo "❌ 致命错误: 找不到目录 $FULL_PATH，请检查仓库结构！"; exit 1; }
 
-          echo "👉 进入目标驱动目录: $TARGET_DIR"
-          cd "$TARGET_DIR" || { echo "❌ 找不到目录 $TARGET_DIR"; exit 1; }
-
-          echo "当前工作目录: $(pwd)"
-
-          # 智能适配编译逻辑
+          # 2. 开始智能编译
           if [ -f "build.sh" ]; then
-            echo "✅ 发现 build.sh，正在修复路径并执行..."
+            echo "✅ 发现 build.sh，正在修复脚本权限与环境路径..."
             chmod +x build.sh
-            sed -i 's|/.*/ndk-build|ndk-build|g' build.sh
-            ./build.sh
+            # 终极修复：用正则把别人写死的 /data/.../ndk-build 或者 /home/.../ndk-build 全部剥离，只保留纯净的 ndk-build 指令
+            sed -i 's|/[^ ]*/ndk-build|ndk-build|g' build.sh
+            
+            # 执行编译！如果这里报错，说明是 C/C++ 源码有语法错误
+            ./build.sh || { echo "❌ C/C++ 源码编译失败！请查看上方报错日志"; exit 1; }
+            
           elif [ -f "jni/Android.mk" ] || [ -f "Android.mk" ]; then
             echo "✅ 发现 Android.mk，直接执行 ndk-build..."
-            ndk-build -j$(nproc --all)
+            ndk-build -j$(nproc --all) || { echo "❌ C/C++ 源码编译失败！请查看上方报错日志"; exit 1; }
+            
           else
-            echo "❌ 未找到 build.sh 或 Android.mk，编译失败！"
-            # 打印当前目录文件以便排错
-            ls -la
+            echo "❌ 未找到 build.sh 或 Android.mk，无法编译！"
             exit 1
           fi
 
-      - name: 提取并上传产物 (Upload Artifact)
+      - name: 📦 搜集并整理编译产物 (Gather Artifacts)
+        run: |
+          # 建立一个绝对安全的暂存区
+          STAGING_DIR="${{ github.workspace }}/upload_staging"
+          mkdir -p "$STAGING_DIR"
+          
+          # 从整个项目中全盘搜索生成的 .so 文件
+          echo "🔍 正在全盘搜索 libKernelGg.so..."
+          FIND_RESULT=$(find . -name "libKernelGg.so")
+          
+          if [ -z "$FIND_RESULT" ]; then
+            echo "❌ 严重错误：编译貌似成功了，但没生成 libKernelGg.so 文件！"
+            echo "这可能是因为 NDK 输出了其他名字的文件，或者产物路径被隐藏了。"
+            exit 1
+          else
+            echo "🎉 找到产物，准备打包，路径如下："
+            echo "$FIND_RESULT"
+            # 无论它多深，强行复制到我们的暂存区
+            find . -name "libKernelGg.so" -exec cp {} "$STAGING_DIR/" \;
+          fi
+
+      - name: ☁️ 上传为下载压缩包 (Upload Artifact)
         uses: actions/upload-artifact@v4
         with:
-          # 💡 同样修复上传时的命名为空的问题
           name: libKernelGg-${{ github.event.inputs.DRIVER || 'ditProKpm' }}
-          path: '**/libs/arm64-v8a/libKernelGg.so'
-          if-no-files-found: error
+          # 直接把暂存区里的文件打包上传，100% 不会报找不到文件的错
+          path: upload_staging/libKernelGg.so
           compression-level: 9
+          if-no-files-found: error
